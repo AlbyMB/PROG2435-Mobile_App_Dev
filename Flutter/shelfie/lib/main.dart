@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:camera/camera.dart';
 import 'package:shelfie/database/category_repository.dart';
 import 'package:shelfie/database/food_repository.dart';
 import 'package:shelfie/database/user_repository.dart';
@@ -14,6 +15,8 @@ import "package:http/http.dart" as http;
 import "package:http/http.dart";
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:google_mlkit_commons/google_mlkit_commons.dart';
+import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart';
 
 void main() {
   WidgetsBinding widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
@@ -62,7 +65,7 @@ class _LoginCheckState extends State<LoginCheck> {
     List<User> loggedInUser = await UserRepository().getLoggedInUser();
     if (loggedInUser.isNotEmpty) {
       print("Logged IN");
-      Navigator.pushReplacementNamed(context, FoodsPage.routeName);
+      Navigator.pushReplacementNamed(context, HomeScreen.routeName);
     } else {
       print("NOT LOGGED IN");
       Navigator.pushReplacementNamed(context, LoginPage.routeName);
@@ -442,6 +445,10 @@ class _FoodsPageState extends State<FoodsPage> {
 
   List<Food> _foods = [];
   List<Category> _categories = [];
+  bool _isSearching = false;
+  String _searchQuery = '';
+  List<Food> _filteredFoods = [];
+
   
   @override
   void initState() {
@@ -460,60 +467,124 @@ class _FoodsPageState extends State<FoodsPage> {
     setState(() {
       _foods = foods; // Update the state to reflect the fetched foods.
       _categories = categories; // Update the state to reflect the fetched categories.
+      _filteredFoods = foods;
     });
 
     
   }
   
+  void _onSearchChanged(String query) {
+  setState(() {
+    _searchQuery = query;
+    _filteredFoods = _foods.where((food) {
+      return food.name.toLowerCase().contains(query.toLowerCase());
+    }).toList();
+  });
+}
+
+  void _deleteFood(Food food) async {
+    bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Food'),
+        content: Text('Are you sure you want to delete "${food.name}"?'),
+        actions: [
+          TextButton(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(context).pop(false),
+          ),
+          TextButton(
+            child: const Text('Delete'),
+            onPressed: () => Navigator.of(context).pop(true),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await FoodRepository().deleteFood(food.id!); // Assume this function exists
+      _initialize(); // Refresh list
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${food.name} deleted')),
+      );
+    }
+  }
 
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('All Foods'),
+        title: _isSearching
+            ? TextField(
+                autofocus: true,
+                decoration: InputDecoration(
+                  hintText: 'Search foods...',
+                  border: InputBorder.none,
+                ),
+                onChanged: _onSearchChanged,
+              )
+            : const Text('All Foods'),
         automaticallyImplyLeading: false,
         actions: [
           IconButton(
-            icon: const Icon(Icons.search),
+            icon: Icon(_isSearching ? Icons.close : Icons.search),
             onPressed: () {
-              debugPrint('Search or filter by category tapped');
+              setState(() {
+                if (_isSearching) {
+                  _isSearching = false;
+                  _searchQuery = '';
+                  _filteredFoods = _foods;
+                } else {
+                  _isSearching = true;
+                }
+              });
             },
           ),
         ],
       ),
-      body: ListView.builder(
-        itemCount: _foods.length,
-        itemBuilder: (context, index) {
-          final food = _foods[index];
-          final category = _categories.firstWhere(
-            (category) => category.id == food.categoryId,
-            orElse: () => Category(id: 0, name: 'Unknown', userId: 0), // Fallback if no category is found.
-          );
-          return ListTile(
-            leading: food.imageUrl != null && food.imageUrl!.isNotEmpty
-          ? Image.network(
-              food.imageUrl!,
-              width: 50,
-              height: 50,
-              fit: BoxFit.cover,
-              errorBuilder: (context, error, stackTrace) {
-                return const Icon(Icons.fastfood, size: 50, color: Colors.grey);
-              },
-            )
-          : const Icon(Icons.fastfood, size: 50, color: Colors.grey), 
-            title: Text(food.name), // Display the food's name as the title.
-            subtitle: Text(
-              '${category.name} \nQuantity: ${food.quantity ?? 'N/A'} ${food.unit ?? ''}', // Display category and quantity in smaller font.
-              style: const TextStyle(fontSize: 14, color: Colors.grey), // Optional styling for subtitle.
+      body: _filteredFoods.isEmpty
+        ? Center(
+            child: Text(
+              _searchQuery.isNotEmpty ? 'No matching foods' : 'No foods added yet',
+              style: TextStyle(fontSize: 18, color: Colors.grey),
             ),
-            onTap: () {
-              // Open food item details or edit options.
-              debugPrint('Tapped on ${food.name}');
+          )
+        : ListView.builder(
+            itemCount: _filteredFoods.length,
+            itemBuilder: (context, index) {
+              final food = _filteredFoods[index];
+              final category = _categories.firstWhere(
+                (category) => category.id == food.categoryId,
+                orElse: () => Category(id: 0, name: 'Unknown', userId: -999),
+              );
+              return ListTile(
+                leading: food.imageUrl != null && food.imageUrl!.isNotEmpty
+                    ? Image.network(
+                        food.imageUrl!,
+                        width: 50,
+                        height: 50,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return const Icon(Icons.fastfood, size: 50, color: Colors.grey);
+                        },
+                      )
+                    : const Icon(Icons.fastfood, size: 50, color: Colors.grey),
+                title: Text(food.name),
+                subtitle: Text(
+                  '${category.name} \nQuantity: ${food.quantity ?? 'N/A'} ${food.unit ?? ''}',
+                  style: const TextStyle(fontSize: 14, color: Colors.grey),
+                ),
+                onTap: () {
+                  debugPrint('Tapped on ${food.name}');
+                },
+                onLongPress: () {
+                  _deleteFood(food);
+                },
+              );
             },
-          );
-        },
-      ),
+          ),
+
       floatingActionButton: FloatingActionButton(
         onPressed: () async{
           await Navigator.pushNamed(context, AddFood.routeName);
@@ -535,105 +606,134 @@ class ShoppingScreen extends StatefulWidget {
 }
 
 class _ShoppingScreenState extends State<ShoppingScreen> {
-  String output = "";
-  double latitude = 43.47063;
-  double longitude = -80.54138;
-  List<Marker> markers = [
-     Marker(
-                    markerId: const MarkerId('UofW'),
-                    position: LatLng(43.4680, -80.5373),
-                    infoWindow: const InfoWindow(title: 'Current Location'),
-                  ),
-                  Marker(
-                    markerId: const MarkerId('Conestoga College'),
-                    position: LatLng(43.470639, -80.54138),
-                    infoWindow: const InfoWindow(title: 'Current Location'),
-                  ),
-  ];
+  GoogleMapController? _controller;
+  Set<Marker> _markers = {};
+  LatLng? _userPos;
 
+  @override
+  void initState() {
+    super.initState();
+    _initLocationAndFetch().catchError((e) {
+    print("Error in location fetch: $e");
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Failed to get location: ${e.toString()}')),
+    );
+  });
+  }
 
-  late GoogleMapController mapController;
+  Future<void> _initLocationAndFetch() async {
+  bool serviceEnabled;
+  LocationPermission permission;
 
-  Future<void> getLocation() async {
-    // 1. check if the device has GPS enabled
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (serviceEnabled == false) {
-      setState(() {
-        output = "GPS is not enabled";
-      });
-      return;
-    }
+  // Check if location services are enabled
+  serviceEnabled = await Geolocator.isLocationServiceEnabled();
+  if (!serviceEnabled) {
+    // You can prompt the user to turn on location settings
+    throw Exception('Location services are disabled.');
+  }
 
-    // 2. Display a popup that asks ther user for location permissions
-    LocationPermission permission = await Geolocator.checkPermission();
+  // Check and request permission if needed
+  permission = await Geolocator.checkPermission();
+  if (permission == LocationPermission.denied) {
+    permission = await Geolocator.requestPermission();
     if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) {
-        setState(() {
-          output = "Location permission denied";
-        });
-        return;
-      }
+      throw Exception('Location permissions are denied');
     }
+  }
 
-    if (permission == LocationPermission.deniedForever) {
-      setState(() {
-        output = "Location permission denied forever";
-      });
-      return;
+  if (permission == LocationPermission.deniedForever) {
+  await showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text("Location Permission"),
+      content: Text(
+          "Location permissions are permanently denied. Please enable them from app settings."),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text("OK"),
+        )
+      ],
+    ),
+  );
+  return;
+}
+
+
+  final pos = await Geolocator.getCurrentPosition();
+  setState(() {
+    _userPos = LatLng(pos.latitude, pos.longitude);
+  });
+  final places = await _fetchNearbyGroceries(pos);
+}
+
+
+  Future<void> _fetchNearbyGroceries(Position pos) async {
+    final url = Uri.parse(
+      'https://maps.googleapis.com/maps/api/place/nearbysearch/json'
+      '?location=${pos.latitude},${pos.longitude}'
+      '&radius=8000&type=grocery_or_supermarket&key=AIzaSyBiddJ-OpwtctcrjM20CiOIvRG3q2eUUIQ'
+    );
+    final resp = await http.get(url);
+    final data = json.decode(resp.body);
+    _addPlaceMarkers(data['results']);
+  }
+
+  void _addPlaceMarkers(List<dynamic> places) {
+    for (var place in places) {
+      final loc = place['geometry']['location'];
+      _markers.add(Marker(
+        markerId: MarkerId(place['place_id']),
+        position: LatLng(loc['lat'], loc['lng']),
+        infoWindow: InfoWindow(title: place['name']),
+      ));
     }
-
-    // 4. Handle the case when the user allows the permission
-    Position position = await Geolocator.getCurrentPosition();
-    setState(() {
-      latitude = position.latitude;
-      longitude = position.longitude;
-      // move the camera to the current location
-      mapController.animateCamera(
-        CameraUpdate.newCameraPosition(
-          CameraPosition(
-            target: LatLng(latitude, longitude),
-            zoom: 14,
-          ),
-        ),
-      );
-      output =
-          "Latitude: ${position.latitude}, Longitude: ${position.longitude}";
-    });
+    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_userPos == null) return Center(child: CircularProgressIndicator());
     return Scaffold(
-      appBar: AppBar(title: const Text('Flutter App')),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            FilledButton(
-              onPressed: () {
-                getLocation();
-              },
-              child: const Text('Get Current Location'),
-            ),
-            Text("Device Location: "),
-            Text("$output"),
-            Expanded(
-              child: GoogleMap(
-                initialCameraPosition: CameraPosition(
-                  target: LatLng(latitude, longitude),
-                  zoom: 14,
-                ),
-                onMapCreated: (GoogleMapController controller) {
-                  mapController = controller;
-                },
-                markers: Set<Marker>.of(markers),
+  appBar: AppBar(
+    title: const Text('Shopping'),
+  ),
+  body: Stack(
+    children: [
+      GoogleMap(
+        onMapCreated: (c) => _controller = c,
+        initialCameraPosition: CameraPosition(target: _userPos!, zoom: 12),
+        markers: _markers,
+        myLocationEnabled: true,
+      ),
+      Positioned(
+        top: 16,
+        left: 16,
+        right: 75,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white.withAlpha((0.9 * 255).toInt()),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [BoxShadow(blurRadius: 8, color: Colors.black12)],
+          ),
+          child: Row(
+            children: const [
+              Icon(Icons.location_on, color: Colors.red),
+              SizedBox(width: 8),
+              Text(
+                'Showing nearby grocery stores',
+                style: TextStyle(fontWeight: FontWeight.w600),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
-    );
+    ],
+  ),
+);
+
   }
 }
 
@@ -654,9 +754,48 @@ class _SettingsPageState extends State<SettingsPage> {
         automaticallyImplyLeading: false,
         title: const Text('Settings'),
       ),
-      body: const Center(
-        child: Text('Settings options go here'),
-      ),
+      body: Center(
+        child: ElevatedButton(
+          onPressed: () async {
+            // Show a confirmation dialog
+            final bool? confirmLogout = await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Log Out'),
+                content: const Text('Are you sure you want to log out?'),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.of(context).pop(false); // User canceled the logout
+                    },
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      Navigator.of(context).pop(true); // User confirmed the logout
+                    },
+                    child: const Text('Log Out'),
+                  ),
+                ],
+              ),
+          );
+
+      if (confirmLogout == true) {
+        List<User> loggedInUser = await UserRepository().getLoggedInUser();
+        if (loggedInUser.isNotEmpty) {
+          loggedInUser[0].isLoggedIn = 'false';
+          await UserRepository().updateUser(loggedInUser[0], loggedInUser[0].id!);
+        }
+        final prefs = await SharedPreferences.getInstance();
+        prefs.remove('userID');
+        Navigator.pushReplacementNamed(context, LoginPage.routeName); 
+
+      }
+    },
+    child: const Text('Log Out'),
+  ),
+),
+
     );
   }
 }
@@ -879,7 +1018,6 @@ class BarcodePage extends StatelessWidget {
     Response responseFromAPI = await http.get(Uri.parse(URL));
 
     dynamic response = jsonDecode(responseFromAPI.body);
-    print(response["product"]["product_name"]);
 
     return response;
 
@@ -899,9 +1037,11 @@ class BarcodePage extends StatelessWidget {
       imageUrl: response["product"]["selected_images"]["front"]["thumb"]["en"],
       createdAt: DateTime.now().toString(),
       updatedAt: DateTime.now().toString(),
-      description: response["product"]["ingredients_text_en"],
-      quantity: double.tryParse(response["product"]["serving_quantity"]),
-      unit: response["product"]["serving_quantity_unit"],
+      description: response["product"]["ingredients_text_en"] ?? 'N/A',
+      quantity: response["product"]["serving_quantity"] != null
+    ? double.tryParse(response["product"]["serving_quantity"].toString()) ?? 0.0
+    : 0.0,
+      unit: response["product"]["serving_quantity_unit"] ?? 'N/A',
     );
 
     FoodRepository().insertFood(newFood);
@@ -954,9 +1094,110 @@ class BarcodePage extends StatelessWidget {
               },
               child: const Text('Submit Barcode'),
             ),
+            ElevatedButton(
+              onPressed: () async {
+                final code = await Navigator.push<String>(
+                  context,
+                  MaterialPageRoute(builder: (_) => BarcodeScannerWidget()),
+                );
+                if (code != null && code.isNotEmpty) {
+                  final response = await fetchData(code);
+                  if (response["result"]["name"] == 'Product found') {
+                    await createFood(response, context);
+                    Navigator.pop(context);
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Invalid barcode')),
+                    );
+                  }
+                }
+              },
+              child: Text('Scan Barcode'),
+            )
+
           ],
         ),
       ),
     );
+  }
+}
+
+class BarcodeScannerWidget extends StatefulWidget {
+  @override
+  _BarcodeScannerWidgetState createState() => _BarcodeScannerWidgetState();
+}
+
+class _BarcodeScannerWidgetState extends State<BarcodeScannerWidget> {
+  late CameraController _cameraController;
+  final BarcodeScanner _barcodeScanner = BarcodeScanner(
+  formats: [BarcodeFormat.ean13, BarcodeFormat.upca],
+);
+  bool _isDetecting = false;
+  bool _isCameraInitialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    final camera = await availableCameras().then((cams) => cams.first);
+    _cameraController = CameraController(camera, ResolutionPreset.medium);
+
+    try {
+      await _cameraController.initialize();
+      await _cameraController.startImageStream(_processCameraImage);
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = true;
+        });
+      }
+    } catch (e) {
+      debugPrint("Camera initialization failed: $e");
+    }
+  }
+
+  void _processCameraImage(CameraImage image) {
+    if (_isDetecting) return;
+    _isDetecting = true;
+
+    final inputImage = InputImage.fromBytes(
+      bytes: image.planes.first.bytes,
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: InputImageRotation.rotation0deg,
+        format: InputImageFormat.nv21,
+        bytesPerRow: image.planes.first.bytesPerRow,
+      ),
+    );
+
+    _barcodeScanner.processImage(inputImage).then((barcodes) {
+  debugPrint("Detected ${barcodes.length} barcodes");
+  for (final barcode in barcodes) {
+    debugPrint("Barcode value: ${barcode.rawValue}");
+  }
+
+  if (barcodes.isNotEmpty && mounted) {
+    Navigator.of(context).pop(barcodes.first.rawValue);
+  }
+}).whenComplete(() => _isDetecting = false);
+
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_isCameraInitialized) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return CameraPreview(_cameraController);
+  }
+
+  @override
+  void dispose() {
+    _cameraController.dispose();
+    _barcodeScanner.close();
+    super.dispose();
   }
 }
